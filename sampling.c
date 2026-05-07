@@ -1,4 +1,3 @@
-
 /* USER CODE BEGIN Header */
 /**
   ******************************************************************************
@@ -45,6 +44,7 @@ ADC_HandleTypeDef hadc1;
 
 SPI_HandleTypeDef hspi1;
 DMA_HandleTypeDef hdma_spi1_tx;
+DMA_HandleTypeDef hdma_spi1_rx;
 
 TIM_HandleTypeDef htim1;
 
@@ -69,29 +69,41 @@ static void MX_SPI1_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-// Global buffer — must be global for DMA
-uint16_t spi_buf;
-uint16_t try = 0;
-uint16_t spi_ready = 1;
-volatile uint32_t busy_count = 0;
+#define BUF_SIZE 64
 
-void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc) {
-	spi_buf = (uint16_t)HAL_ADC_GetValue(hadc);
-	spi_ready = 1;
+volatile uint16_t TX_Buffer[BUF_SIZE];
+volatile uint8_t spi_index = 0;
+volatile uint8_t spi_ready = 0;
+
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
+{
+	uint16_t sample = HAL_ADC_GetValue(hadc) & 0x0FFF;
+
+    TX_Buffer[spi_index++] = (uint16_t)(sample);
+
+    HAL_GPIO_TogglePin(LD3_GPIO_Port, LD3_Pin);
+
+    if (spi_index >= BUF_SIZE)
+    {
+        spi_index = 0;
 
 
-    if (try==1) {
-    	HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_8);
-    	try = 0;
-    } else {
-    	try = 1;
+        if (!spi_ready)  // don't start if previous transfer still in progress
+		{
+      HAL_GPIO_TogglePin(Test_GPIO_Port, Test_Pin);
+      
+			spi_ready = 1;
+			
+			HAL_SPI_Transmit_DMA(&hspi1, (uint8_t*)TX_Buffer, BUF_SIZE);
+		}
     }
 
 }
 
-void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi) {
-    // pull CS high after sent through spi
-    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);
+void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
+{
+
+    spi_ready = 0;
 }
 /* USER CODE END 0 */
 
@@ -134,19 +146,13 @@ int main(void)
 
   HAL_ADC_Start_IT(&hadc1);
 
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-
-	  if (spi_ready) {
-		  spi_ready = 0;
-		  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET);
-
-		  HAL_SPI_Transmit(&hspi1, (uint8_t*)&spi_buf, 1, 10);
-	  }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -294,14 +300,14 @@ static void MX_SPI1_Init(void)
   hspi1.Init.DataSize = SPI_DATASIZE_16BIT;
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
-  hspi1.Init.NSS = SPI_NSS_SOFT;
+  hspi1.Init.NSS = SPI_NSS_HARD_OUTPUT;
   hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
   hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
   hspi1.Init.CRCPolynomial = 7;
   hspi1.Init.CRCLength = SPI_CRC_LENGTH_DATASIZE;
-  hspi1.Init.NSSPMode = SPI_NSS_PULSE_ENABLE;
+  hspi1.Init.NSSPMode = SPI_NSS_PULSE_DISABLE;
   if (HAL_SPI_Init(&hspi1) != HAL_OK)
   {
     Error_Handler();
@@ -404,6 +410,9 @@ static void MX_DMA_Init(void)
   __HAL_RCC_DMA1_CLK_ENABLE();
 
   /* DMA interrupt init */
+  /* DMA1_Channel2_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel2_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel2_IRQn);
   /* DMA1_Channel3_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Channel3_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel3_IRQn);
