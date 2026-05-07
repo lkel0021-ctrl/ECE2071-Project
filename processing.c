@@ -129,6 +129,7 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+
 	  if (data_ready)
 	  {
 		  data_ready = 0;
@@ -176,7 +177,7 @@ int main(void)
 		  /* transmit header then filtered audio data */
 		  uint8_t header[4] = {0xAA, 0xBB, 0xCC, 0xDD};
 		  HAL_UART_Transmit(&huart2, header, 4, 10);
-		  HAL_UART_Transmit(&huart2, (uint8_t*)filtered_Buffer, BUF_SIZE * 2, 100);
+		  HAL_UART_Transmit(&huart2, (uint8_t*)RX_Buffer, BUF_SIZE * 2, 100);
 
 		  // re-arm
 		  HAL_SPI_Receive_DMA(&hspi1, (uint8_t*)RX_Buffer, BUF_SIZE);
