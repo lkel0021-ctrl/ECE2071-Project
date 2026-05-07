@@ -69,7 +69,7 @@ static void MX_SPI1_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-#define BUF_SIZE 64
+#define BUF_SIZE 128
 
 volatile uint16_t TX_Buffer[BUF_SIZE];
 volatile uint8_t spi_index = 0;
@@ -77,32 +77,38 @@ volatile uint8_t spi_ready = 0;
 
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
+  // remove top 4 bits (set to zero)
 	uint16_t sample = HAL_ADC_GetValue(hadc) & 0x0FFF;
 
-    TX_Buffer[spi_index++] = (uint16_t)(sample);
+  // collect in the chunk buffer, then increment index
+  TX_Buffer[spi_index++] = (uint16_t)(sample);
 
-    HAL_GPIO_TogglePin(LD3_GPIO_Port, LD3_Pin);
+  // if we have enough samples, send through
+  if (spi_index >= BUF_SIZE)
+  {
+    // reset index
+    spi_index = 0;
 
-    if (spi_index >= BUF_SIZE)
+    // don't start if previous transfer still in progress
+    if (!spi_ready)  
     {
-        spi_index = 0;
 
-
-        if (!spi_ready)  // don't start if previous transfer still in progress
-		{
+      // toggle pin for testing transmission
       HAL_GPIO_TogglePin(Test_GPIO_Port, Test_Pin);
-      
-			spi_ready = 1;
-			
-			HAL_SPI_Transmit_DMA(&hspi1, (uint8_t*)TX_Buffer, BUF_SIZE);
-		}
+
+      // reset spi_ready
+      spi_ready = 1;
+
+      // transmit BUF_SIZE samples from TX_Buffer (says uint8, but is actually uint16)
+      HAL_SPI_Transmit_DMA(&hspi1, (uint8_t*)TX_Buffer, BUF_SIZE);
     }
+  }
 
 }
 
 void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
 {
-
+    // when transmission is over, signal that next chunk can be sent
     spi_ready = 0;
 }
 /* USER CODE END 0 */
