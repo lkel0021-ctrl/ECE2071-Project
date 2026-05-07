@@ -65,15 +65,20 @@ static void MX_SPI1_Init(void);
 #define BUF_SIZE 128
 
 uint16_t RX_Buffer[BUF_SIZE];
-//volatile uint8_t active_buf = 0;
+
+/* Moving average filter buffer, stores the filtered output before transmitting */
+uint16_t filtered_Buffer[BUF_SIZE];
+
 volatile uint8_t data_ready = 0;
+
+/* Keeps track of the last sample from the previous buffer ) */
+uint16_t prev_sample = 0;
 
 void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef *hspi)
 {
 	 if (hspi->Instance == SPI1)
 	{
 		HAL_GPIO_TogglePin(Test_GPIO_Port, Test_Pin);
-		//active_buf ^= 1;
 		data_ready = 1;
 		// No re-arm — circular DMA handles it
 	}
@@ -121,20 +126,31 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  /*if (data_ready)
-	  {
-		  data_ready = 0;
-		  HAL_UART_Transmit(&huart2, RX_Buffer[active_buf ^ 1],
-						   BUF_SIZE * 2, 100);
-
-	  }*/
-
 	  if (data_ready)
 	  {
 		  data_ready = 0;
+
+  /*moving average concept*/
+		  for (int i = 0; i < BUF_SIZE; i++)
+		  {
+			  if (i == 0)
+			  {
+				  /* first sample in buffer, uses prev_sample from last buffer */
+				  filtered_Buffer[i] = (RX_Buffer[i] + prev_sample) / 2; /*if sample is 0 for example, it won't go to negative 1*/
+			  }
+			  else
+			  {
+				  filtered_Buffer[i] = (RX_Buffer[i] + RX_Buffer[i - 1]) / 2; /*for all other cases after the first sample*/
+			  }
+		  }
+
+		  /* save the last sample of this buffer for next time */
+		  prev_sample = RX_Buffer[BUF_SIZE - 1];
+
+		  /* transmit header then filtered audio data */
 		  uint8_t header[4] = {0xAA, 0xBB, 0xCC, 0xDD};
 		  HAL_UART_Transmit(&huart2, header, 4, 10);
-		  HAL_UART_Transmit(&huart2, (uint8_t*)RX_Buffer, BUF_SIZE * 2, 100);
+		  HAL_UART_Transmit(&huart2, (uint8_t*)filtered_Buffer, BUF_SIZE * 2, 100);
 
 		  // re-arm
 		  HAL_SPI_Receive_DMA(&hspi1, (uint8_t*)RX_Buffer, BUF_SIZE);
