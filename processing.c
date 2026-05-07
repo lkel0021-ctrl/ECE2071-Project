@@ -64,6 +64,9 @@ static void MX_SPI1_Init(void);
 
 #define BUF_SIZE 128
 
+/* How far a sample can be from the buffer mean before it is considered an outlier. */
+#define OUTLIER_THRESHOLD 200
+
 uint16_t RX_Buffer[BUF_SIZE];
 
 /* Moving average filter buffer, stores the filtered output before transmitting */
@@ -129,6 +132,29 @@ int main(void)
 	  if (data_ready)
 	  {
 		  data_ready = 0;
+
+		  /* outlier rejection, calculates mean of buffer, replace any sample
+		   * more than OUTLIER_THRESHOLD away from mean with the previous sample */
+		  uint32_t sum = 0;
+		  for (int i = 0; i < BUF_SIZE; i++)
+		  {
+			  sum += RX_Buffer[i];
+		  }
+		  uint16_t mean = (uint16_t)(sum / BUF_SIZE);
+
+		  for (int i = 0; i < BUF_SIZE; i++)
+		  {
+			  int32_t diff = (int32_t)RX_Buffer[i] - (int32_t)mean;
+			  if (diff < 0) diff = -diff;
+
+			  if (diff > OUTLIER_THRESHOLD)
+			  {
+				  if (i == 0)
+					  RX_Buffer[i] = prev_sample;
+				  else
+					  RX_Buffer[i] = RX_Buffer[i - 1];
+			  }
+		  }
 
   /*moving average concept*/
 		  for (int i = 0; i < BUF_SIZE; i++)
