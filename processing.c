@@ -43,7 +43,10 @@
 SPI_HandleTypeDef hspi1;
 DMA_HandleTypeDef hdma_spi1_rx;
 
+TIM_HandleTypeDef htim16;
+
 UART_HandleTypeDef huart2;
+DMA_HandleTypeDef hdma_usart2_tx;
 
 /* USER CODE BEGIN PV */
 
@@ -55,30 +58,26 @@ static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_SPI1_Init(void);
+static void MX_TIM16_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
-#define BUF_SIZE 128
-
-/* How far a sample can be from the buffer mean before it is considered an outlier. */
-#define OUTLIER_THRESHOLD 200
+#define BUF_SIZE 220
+#define OUTLIER_THRESHOLD 100
 
 uint16_t RX_Buffer[BUF_SIZE];
-
 /* Moving average filter buffer, stores the filtered output before transmitting */
 uint16_t filtered_Buffer[BUF_SIZE];
-
-volatile uint8_t data_ready = 0;
+volatile uint8_t data_ready = 2048;
 
 /* Keeps track of the last sample from the previous buffer ) */
 uint16_t prev_sample = 0;
-
 void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef *hspi)
 {
+
 	 if (hspi->Instance == SPI1)
 	{
 		HAL_GPIO_TogglePin(Test_GPIO_Port, Test_Pin);
@@ -86,6 +85,180 @@ void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef *hspi)
 		// No re-arm — circular DMA handles it
 	}
 }
+
+typedef enum {
+    SENSOR_TRIGGER,
+    SENSOR_WAIT_RISING,
+    SENSOR_WAIT_FALLING,
+	SENSOR_IDLE
+} SensorState;
+
+SensorState sensor_state = SENSOR_TRIGGER;
+#define TIMEOUT_US 30000
+#define SENSOR_OUTLIERS 3
+#define CLOSE_THRESHOLD_CM 10
+#define STOP_DELAY_MS 1000
+uint16_t consecutive_data = 0;
+uint32_t echo_time = 0;
+volatile uint8_t recording = 0;
+uint32_t sensor_timestamp = 0;
+uint32_t distance_cm = 0;
+static uint8_t close_count = 0;
+static uint32_t last_seen_time = 0;
+
+
+void sensor_update(void)
+{
+
+	switch(sensor_state)
+	{
+		case SENSOR_TRIGGER:
+			HAL_GPIO_WritePin(trigger_GPIO_Port, trigger_Pin, GPIO_PIN_SET);
+			__HAL_TIM_SET_COUNTER(&htim16, 0);
+			sensor_state = SENSOR_WAIT_RISING;
+			break;
+
+		case SENSOR_WAIT_RISING:
+
+			if (__HAL_TIM_GET_COUNTER(&htim16) >= 10)
+				HAL_GPIO_WritePin(trigger_GPIO_Port, trigger_Pin, GPIO_PIN_RESET);
+
+			// echo HIGH
+			if (HAL_GPIO_ReadPin(echo_GPIO_Port, echo_Pin))
+			{
+				__HAL_TIM_SET_COUNTER(&htim16, 0);
+				sensor_state = SENSOR_WAIT_FALLING;
+			}
+
+			// timeout: no echo at all
+			else if (__HAL_TIM_GET_COUNTER(&htim16) > TIMEOUT_US)
+			{
+				sensor_timestamp = HAL_GetTick();
+				sensor_state = SENSOR_IDLE;
+			}
+
+			break;
+
+		case SENSOR_WAIT_FALLING:
+
+			// echo LOW (normal completion)
+			if (!HAL_GPIO_ReadPin(echo_GPIO_Port, echo_Pin))
+			{
+				echo_time = __HAL_TIM_GET_COUNTER(&htim16);
+				distance_cm = echo_time / 58;
+
+//				char buf[32];
+//				sprintf(buf, "dist: %lu\r\n", distance_cm);
+//				HAL_UART_Transmit(&huart2, (uint8_t*)buf, strlen(buf), 100);
+
+				if (distance_cm > 0 && distance_cm < CLOSE_THRESHOLD_CM)
+				{
+
+				    if (close_count < SENSOR_OUTLIERS)
+				        close_count++;
+				}
+				else
+				{
+				    close_count = 0;
+				}
+
+				if (close_count >= SENSOR_OUTLIERS)
+				{
+				    recording = 1;
+				    last_seen_time = HAL_GetTick();  // IMPORTANT
+				}
+
+				// stop condition
+				if (recording == 1)
+				{
+
+				    if (HAL_GetTick() - last_seen_time > STOP_DELAY_MS)
+				    {
+
+				        recording = 0;
+				        close_count = 0;
+				    }
+				}
+
+				sensor_timestamp = HAL_GetTick();
+				sensor_state = SENSOR_IDLE;
+			}
+
+			// timeout: echo stuck HIGH or glitch
+			else if (__HAL_TIM_GET_COUNTER(&htim16) > TIMEOUT_US)
+			{
+				sensor_timestamp = HAL_GetTick();
+				sensor_state = SENSOR_IDLE;
+			}
+
+			break;
+
+		case SENSOR_IDLE:
+
+			if (HAL_GetTick() - sensor_timestamp >= 60)
+				sensor_state = SENSOR_TRIGGER;
+
+			break;
+	}
+}
+
+void upload_data()
+{
+	data_ready = 0;
+
+	  /* outlier rejection */
+	  uint32_t sum = 0;
+	  for (int i = 0; i < BUF_SIZE; i++)
+		  sum += RX_Buffer[i] & 0x0FFF;
+	  uint16_t mean = (uint16_t)(sum / BUF_SIZE);
+
+	  for (int i = 0; i < BUF_SIZE; i++)
+	  {
+		  uint16_t sample = RX_Buffer[i] & 0x0FFF;
+		  int32_t diff = (int32_t)sample - (int32_t)mean;
+		  if (diff < 0) diff = -diff;
+		  if (diff > OUTLIER_THRESHOLD)
+			  RX_Buffer[i] = (i == 0) ? prev_sample : RX_Buffer[i - 1] & 0x0FFF;
+		  else
+			  RX_Buffer[i] = sample;
+	  }
+
+	  for (int i = 0; i < BUF_SIZE; i++)
+	  {
+		  uint16_t cur  = RX_Buffer[i] & 0x0FFF;
+		  uint16_t prev = (i == 0) ? (prev_sample & 0x0FFF) : (RX_Buffer[i-1] & 0x0FFF);
+		  filtered_Buffer[i] = (cur + prev) >> 1;  // divide by 2 with shift
+	  }
+
+	  prev_sample = RX_Buffer[BUF_SIZE - 1];  // save for next buffer boundary
+
+	  /* transmit header then filtered audio data */
+	  uint8_t header[4] = {0xAA, 0xBB, 0xCC, 0xDD};
+	  HAL_UART_Transmit(&huart2, header, 4, 10);
+	  HAL_UART_Transmit_DMA(&huart2, (uint8_t*)filtered_Buffer, BUF_SIZE * 2);
+	  // re-arm
+	  HAL_SPI_Receive_DMA(&hspi1, (uint8_t*)RX_Buffer, BUF_SIZE);
+}
+
+uint8_t uart_rx_byte = 0;
+
+// 3 is manual, 4 is distance trigger
+volatile uint8_t mode = 3;
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == USART2)
+    {
+        if (uart_rx_byte == 3)
+            mode = 3;
+        else if (uart_rx_byte == 4)
+            mode = 4;
+
+        // re-arm
+        HAL_UART_Receive_IT(&huart2, &uart_rx_byte, 1);
+    }
+}
+
 /* USER CODE END 0 */
 
 /**
@@ -120,69 +293,41 @@ int main(void)
   MX_DMA_Init();
   MX_USART2_UART_Init();
   MX_SPI1_Init();
+  MX_TIM16_Init();
   /* USER CODE BEGIN 2 */
-
-  HAL_SPI_Receive_DMA(&hspi1, RX_Buffer, BUF_SIZE);
+  HAL_SPI_Receive_DMA(&hspi1, (uint8_t*)RX_Buffer, BUF_SIZE);
+  HAL_UART_Receive_IT(&huart2, &uart_rx_byte, 1);
+  HAL_TIM_Base_Start(&htim16);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+	  sensor_update();
 
 	  if (data_ready)
 	  {
-		  data_ready = 0;
-
-		  /* outlier rejection, calculates mean of buffer, replace any sample
-		   * more than OUTLIER_THRESHOLD away from mean with the previous sample */
-		  uint32_t sum = 0;
-		  for (int i = 0; i < BUF_SIZE; i++)
+		  if (mode == 3) // if state is in manual mode, constantly upload
 		  {
-			  sum += RX_Buffer[i];
+			  upload_data();
 		  }
-		  uint16_t mean = (uint16_t)(sum / BUF_SIZE);
-
-		  for (int i = 0; i < BUF_SIZE; i++)
+		  else if (mode == 4) // if state is in distance trigger mode
 		  {
-			  int32_t diff = (int32_t)RX_Buffer[i] - (int32_t)mean;
-			  if (diff < 0) diff = -diff;
 
-			  if (diff > OUTLIER_THRESHOLD)
+			  if (recording == 1)
 			  {
-				  if (i == 0)
-					  RX_Buffer[i] = prev_sample;
-				  else
-					  RX_Buffer[i] = RX_Buffer[i - 1];
+				  HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, 1);
+
+				  upload_data();
+			  }
+			  else {
+				  HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, 0);
 			  }
 		  }
 
-  /*moving average concept*/
-		  for (int i = 0; i < BUF_SIZE; i++)
-		  {
-			  if (i == 0)
-			  {
-				  /* first sample in buffer, uses prev_sample from last buffer */
-				  filtered_Buffer[i] = (RX_Buffer[i] + prev_sample) / 2; /*if sample is 0 for example, it won't go to negative 1*/
-			  }
-			  else
-			  {
-				  filtered_Buffer[i] = (RX_Buffer[i] + RX_Buffer[i - 1]) / 2; /*for all other cases after the first sample*/
-			  }
-		  }
 
-		  /* save the last sample of this buffer for next time */
-		  prev_sample = RX_Buffer[BUF_SIZE - 1];
-
-		  /* transmit header then filtered audio data */
-		  uint8_t header[4] = {0xAA, 0xBB, 0xCC, 0xDD};
-		  HAL_UART_Transmit(&huart2, header, 4, 10);
-		  HAL_UART_Transmit(&huart2, (uint8_t*)RX_Buffer, BUF_SIZE * 2, 100);
-
-		  // re-arm
-		  HAL_SPI_Receive_DMA(&hspi1, (uint8_t*)RX_Buffer, BUF_SIZE);
 	  }
-
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -290,6 +435,38 @@ static void MX_SPI1_Init(void)
 }
 
 /**
+  * @brief TIM16 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM16_Init(void)
+{
+
+  /* USER CODE BEGIN TIM16_Init 0 */
+
+  /* USER CODE END TIM16_Init 0 */
+
+  /* USER CODE BEGIN TIM16_Init 1 */
+
+  /* USER CODE END TIM16_Init 1 */
+  htim16.Instance = TIM16;
+  htim16.Init.Prescaler = 31;
+  htim16.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim16.Init.Period = 65535;
+  htim16.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim16.Init.RepetitionCounter = 0;
+  htim16.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim16) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM16_Init 2 */
+
+  /* USER CODE END TIM16_Init 2 */
+
+}
+
+/**
   * @brief USART2 Initialization Function
   * @param None
   * @retval None
@@ -337,6 +514,9 @@ static void MX_DMA_Init(void)
   /* DMA1_Channel2_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Channel2_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel2_IRQn);
+  /* DMA1_Channel7_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel7_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel7_IRQn);
 
 }
 
@@ -361,7 +541,13 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(Test_GPIO_Port, Test_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, LD3_Pin|trigger_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : echo_Pin */
+  GPIO_InitStruct.Pin = echo_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(echo_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : Test_Pin */
   GPIO_InitStruct.Pin = Test_Pin;
@@ -370,12 +556,12 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(Test_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : LD3_Pin */
-  GPIO_InitStruct.Pin = LD3_Pin;
+  /*Configure GPIO pins : LD3_Pin trigger_Pin */
+  GPIO_InitStruct.Pin = LD3_Pin|trigger_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(LD3_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 

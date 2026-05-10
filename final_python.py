@@ -151,7 +151,7 @@ def distance_trigger_mode(options):
 
     def listen_for_stop():
         global stop_flag
-        input("Press Enter to stop recording!")
+        input("Press Enter to stop recording!\n")
         stop_flag = True
 
     threading.Thread(target=listen_for_stop, daemon=True).start()
@@ -177,7 +177,7 @@ def distance_trigger_mode(options):
                 break
 
             if not started:
-                print("\nStarted Recording")
+                print("\nStarted Recording...")
                 started = 1
             
             buf = buf[1:] + byte
