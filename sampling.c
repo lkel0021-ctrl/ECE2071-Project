@@ -44,7 +44,6 @@ ADC_HandleTypeDef hadc1;
 
 SPI_HandleTypeDef hspi1;
 DMA_HandleTypeDef hdma_spi1_tx;
-DMA_HandleTypeDef hdma_spi1_rx;
 
 TIM_HandleTypeDef htim1;
 
@@ -69,47 +68,44 @@ static void MX_SPI1_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-#define BUF_SIZE 128
 
+#define BUF_SIZE 220
 volatile uint16_t TX_Buffer[BUF_SIZE];
 volatile uint8_t spi_index = 0;
 volatile uint8_t spi_ready = 0;
-
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
-  // remove top 4 bits (set to zero)
+	// get 12-bit ADC value, ensure it is 12-bit with masking
 	uint16_t sample = HAL_ADC_GetValue(hadc) & 0x0FFF;
-
-  // collect in the chunk buffer, then increment index
-  TX_Buffer[spi_index++] = (uint16_t)(sample);
-
-  // if we have enough samples, send through
-  if (spi_index >= BUF_SIZE)
-  {
-    // reset index
-    spi_index = 0;
-
-    // don't start if previous transfer still in progress
-    if (!spi_ready)  
-    {
-
-      // toggle pin for testing transmission
-      HAL_GPIO_TogglePin(Test_GPIO_Port, Test_Pin);
-
-      // reset spi_ready
-      spi_ready = 1;
-
-      // transmit BUF_SIZE samples from TX_Buffer (says uint8, but is actually uint16)
-      HAL_SPI_Transmit_DMA(&hspi1, (uint8_t*)TX_Buffer, BUF_SIZE);
-    }
-  }
-
+	
+	// add it to the buffer, then increment
+   TX_Buffer[spi_index++] = (uint16_t)(sample);
+   
+   HAL_GPIO_TogglePin(LD3_GPIO_Port, LD3_Pin);
+   if (spi_index >= BUF_SIZE)
+   {
+	   // reset the index marker
+       spi_index = 0;
+       if (!spi_ready)  // don't start if previous transfer still in progress
+		{
+			spi_ready = 1;
+			HAL_GPIO_TogglePin(Test_GPIO_Port, Test_Pin);
+			
+			// set nss low to signal start transmission
+			HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET);
+			
+			// transmit BUF_SIZE * 16 bit samples through SPI DMA
+			HAL_SPI_Transmit_DMA(&hspi1, (uint8_t*)TX_Buffer, BUF_SIZE);
+		}
+   }
 }
-
 void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
 {
-    // when transmission is over, signal that next chunk can be sent
-    spi_ready = 0;
+	// set nss high to signal end transmission
+	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);
+	
+	// signal that transmission is over, can start again
+   spi_ready = 0;
 }
 /* USER CODE END 0 */
 
@@ -121,7 +117,6 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -130,14 +125,12 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-
   /* USER CODE END Init */
 
   /* Configure the system clock */
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
@@ -148,21 +141,18 @@ int main(void)
   MX_TIM1_Init();
   MX_SPI1_Init();
   /* USER CODE BEGIN 2 */
-  HAL_TIM_Base_Start(&htim1);
-
-  HAL_ADC_Start_IT(&hadc1);
-
-
+ HAL_TIM_Base_Start(&htim1);
+ HAL_ADC_Start_IT(&hadc1);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  while (1)
-  {
+ while (1)
+ {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-  }
+ }
   /* USER CODE END 3 */
 }
 
@@ -306,7 +296,7 @@ static void MX_SPI1_Init(void)
   hspi1.Init.DataSize = SPI_DATASIZE_16BIT;
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
-  hspi1.Init.NSS = SPI_NSS_HARD_OUTPUT;
+  hspi1.Init.NSS = SPI_NSS_SOFT;
   hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
   hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
@@ -319,7 +309,6 @@ static void MX_SPI1_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN SPI1_Init 2 */
-
   /* USER CODE END SPI1_Init 2 */
 
 }
@@ -416,9 +405,6 @@ static void MX_DMA_Init(void)
   __HAL_RCC_DMA1_CLK_ENABLE();
 
   /* DMA interrupt init */
-  /* DMA1_Channel2_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Channel2_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(DMA1_Channel2_IRQn);
   /* DMA1_Channel3_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Channel3_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel3_IRQn);
@@ -443,13 +429,13 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4|Test_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin : PA8 */
-  GPIO_InitStruct.Pin = GPIO_PIN_8;
+  /*Configure GPIO pins : PA4 Test_Pin */
+  GPIO_InitStruct.Pin = GPIO_PIN_4|Test_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
