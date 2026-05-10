@@ -4,15 +4,14 @@ import time
 import numpy as np
 import wave
 import matplotlib.pyplot as plt
+import threading
 
 # configuration
 BAUD = 921600
 SAMPLE_RATE = 44100
-BUF_SIZE = 128
-DURATION = 10
+BUF_SIZE = 220
 STOP_DELAY = 3
 trigger_mode = False
-total_samples = SAMPLE_RATE * DURATION
 
 # 4 byte synchronisation marker which is sent before each chunk 
 SYNC = bytes([0xAA, 0xBB, 0xCC, 0xDD])
@@ -54,6 +53,8 @@ def save_data(options, filename, received):
     csv_name = f"{filename}.csv"
     png_name = f"{filename}.png"
 
+    total_samples = len(received)
+
     # convert to numpy array
     samples = np.array(received[:total_samples], dtype=np.uint16)
 
@@ -75,6 +76,7 @@ def save_data(options, filename, received):
         np.savetxt(csv_name, frameData, delimiter=",")
 
     if (options[0]):
+        plt.figure()
         plt.plot(framesnum[0:1000], samples[0:1000])
         plt.title("Sound wave of inputted sound")
         plt.xlabel("Frame")
@@ -84,8 +86,8 @@ def save_data(options, filename, received):
     print("Saved!")
 
 def manual_mode():
-    
-    ser.write(bytes([4]))
+
+    ser.write(bytes([3]))
 
     print("\n--- MANUAL RECORDING MODE ---")
     print("You choose how long to record and which formats to save.\n")
@@ -101,7 +103,7 @@ def manual_mode():
 
     options = get_output_options()
 
-    filename = input("Output filename (no extension): ").strip()
+    filename = input("Output filename: ").strip()
     if not filename:
         filename = "manual_recording"
 
@@ -113,10 +115,10 @@ def manual_mode():
             if bytes(buf) == SYNC:
                 return True
 
-    total_samples = SAMPLE_RATE * DURATION
+    total_samples = SAMPLE_RATE * duration
     received = []
 
-    print(f"Recording {DURATION} seconds...")
+    print(f"Recording {duration} seconds...")
 
     # read each chunk
     while len(received) < total_samples:
@@ -139,36 +141,56 @@ def manual_mode():
 
 def distance_trigger_mode(options):
 
-    ser.write(bytes([3]))
+    ser.write(bytes([4]))
 
     received = []
-    recording_number = 0
-    print("Recording...")
+    recording_number = 1
+    
+    stop_flag = False
+    started = 0
 
-    while True:
+    def listen_for_stop():
+        global stop_flag
+        input("Press Enter to stop recording!")
+        stop_flag = True
+
+    threading.Thread(target=listen_for_stop, daemon=True).start()
+
+    print("Waiting for data...")
+
+    while not stop_flag:
         buf = bytearray(4)
+        got_sync = False
 
         while True:
             byte = ser.read(1)
             if len(byte) == 0:
                 if len(received) > 0:
-                    print(f"\nNothing received — saving recording {recording_number}...")
-                    save_data(options, recording_number, received)
+                    print(f"\nStopped recording — saving recording {recording_number}...")
+                    filename = f"Recording #{recording_number}"
+                    save_data(options, filename, received)
                     recording_number += 1
                     received = []
+                    started = 0
                 else:
                     print("\nNo data received — waiting...")
                 break
+
+            if not started:
+                print("\nStarted Recording")
+                started = 1
             
             buf = buf[1:] + byte
             
             if bytes(buf) == SYNC:
+                got_sync = True
                 break
 
-        chunk = ser.read(BUF_SIZE * 2)
-        if len(chunk) == BUF_SIZE * 2:
-            samples = np.frombuffer(chunk, dtype='<u2') & 0x0FFF
-            received.extend(samples)   
+        if got_sync:
+            chunk = ser.read(BUF_SIZE * 2)
+            if len(chunk) == BUF_SIZE * 2:
+                samples = np.frombuffer(chunk, dtype='<u2') & 0x0FFF
+                received.extend(samples)
 
 
 
