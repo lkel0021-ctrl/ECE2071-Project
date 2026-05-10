@@ -32,7 +32,7 @@ def find_stm32_port():
 
 PORT = find_stm32_port()
 
-ser = serial.Serial(PORT, BAUD, timeout=5)
+ser = serial.Serial(PORT, BAUD, timeout=0.1)
 
 def get_output_options():
     options = ['png', 'csv']
@@ -147,10 +147,11 @@ def distance_trigger_mode(options):
     recording_number = 1
     
     stop_flag = False
-    started = 0
+    started = False
+    printed_no_data = False
 
     def listen_for_stop():
-        global stop_flag
+        nonlocal stop_flag
         input("Press Enter to stop recording!\n")
         stop_flag = True
 
@@ -171,14 +172,18 @@ def distance_trigger_mode(options):
                     save_data(options, filename, received)
                     recording_number += 1
                     received = []
-                    started = 0
+                    started = False
+                    printed_no_data = False
                 else:
-                    print("\nNo data received — waiting...")
+                    if not printed_no_data:
+                        print("\nNo data received — waiting...")
+                        printed_no_data = True
+                    
                 break
 
             if not started:
                 print("\nStarted Recording...")
-                started = 1
+                started = True
             
             buf = buf[1:] + byte
             
